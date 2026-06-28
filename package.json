@@ -1,0 +1,16 @@
+{
+  "name": "3rdfloortapes-offers-backend",
+  "version": "1.0.0",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^9.4.3",
+    "express": "^4.18.2",
+    "nodemailer": "^6.9.9"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
