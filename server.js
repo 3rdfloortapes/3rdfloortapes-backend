@@ -1,5 +1,6 @@
 const express = require('express');
 const crypto = require('crypto');
+const Stripe = require('stripe');
 
 const app = express();
 app.use(express.json());
@@ -8,10 +9,13 @@ const {
   OWNER_EMAIL = 'support@3rdfloortapes.com',
   RESEND_API_KEY,
   FROM_EMAIL = 'onboarding@resend.dev',
+  STRIPE_SECRET_KEY,
   PORT = 3000,
 } = process.env;
 
-async function sendOfferEmail({ buyer_name, buyer_email, message, open_to_counter, items, id }) {
+const stripe = Stripe(STRIPE_SECRET_KEY);
+
+async function sendOfferEmail({ buyer_name, buyer_email, message, open_to_counter, items, id, card_on_file }) {
   const total = items.reduce((sum, i) => sum + parseFloat(i.offer_price), 0);
 
   const rows = items.map((i) => {
@@ -30,6 +34,7 @@ async function sendOfferEmail({ buyer_name, buyer_email, message, open_to_counte
       <tr><td><b>Buyer</b></td><td>${buyer_name}</td></tr>
       <tr><td><b>Email</b></td><td>${buyer_email}</td></tr>
       <tr><td><b>Open to Counter?</b></td><td>${open_to_counter ? 'YES' : 'No'}</td></tr>
+      <tr><td><b>Card on File?</b></td><td>${card_on_file ? 'YES — see Stripe dashboard' : 'No'}</td></tr>
       ${message ? `<tr><td><b>Message</b></td><td>${message}</td></tr>` : ''}
       <tr><td><b>Offer ID</b></td><td>${id}</td></tr>
     </table>
@@ -62,6 +67,31 @@ async function sendOfferEmail({ buyer_name, buyer_email, message, open_to_counte
   }
 }
 
+// Create a Stripe Checkout Session in setup mode — saves a card, charges nothing
+app.post('/create-setup-session', async (req, res) => {
+  try {
+    const { buyer_email, buyer_name } = req.body;
+    if (!buyer_email) return res.status(400).json({ error: 'Missing buyer_email' });
+
+    const customers = await stripe.customers.list({ email: buyer_email, limit: 1 });
+    const customer = customers.data[0]
+      ?? await stripe.customers.create({ email: buyer_email, name: buyer_name });
+
+    const session = await stripe.checkout.sessions.create({
+      mode: 'setup',
+      customer: customer.id,
+      payment_method_types: ['card'],
+      success_url: 'https://3rdfloortapes.com/pages/offer-card-saved?session_id={CHECKOUT_SESSION_ID}',
+      cancel_url: 'https://3rdfloortapes.com/pages/offer-card-cancelled',
+    });
+
+    res.json({ url: session.url, customer_id: customer.id });
+  } catch (e) {
+    console.error('Stripe setup session error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post('/offers', async (req, res) => {
   try {
     const {
@@ -89,14 +119,17 @@ app.post('/offers', async (req, res) => {
 
 app.post('/offers-batch', async (req, res) => {
   try {
-    const { buyer_name, buyer_email, message, open_to_counter, items } = req.body;
+    const { buyer_name, buyer_email, message, open_to_counter, items, stripe_customer_id } = req.body;
 
     if (!buyer_name || !buyer_email || !Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
     const id = crypto.randomUUID();
-    await sendOfferEmail({ buyer_name, buyer_email, message, open_to_counter, items, id });
+    await sendOfferEmail({
+      buyer_name, buyer_email, message, open_to_counter, items, id,
+      card_on_file: !!stripe_customer_id,
+    });
 
     res.json({ status: 'ok', id });
   } catch (e) {
