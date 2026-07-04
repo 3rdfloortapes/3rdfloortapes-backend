@@ -22,7 +22,7 @@ async function sendOfferEmail({ buyer_name, buyer_email, message, open_to_counte
     const savings = (i.list_price - i.offer_price).toFixed(2);
     const pct = Math.round(((i.list_price - i.offer_price) / i.list_price) * 100);
     return `<tr>
-      <td>${i.product_title}</td>
+      <td>${i.product_title}${i.competitor_link ? `<br><small>Competitor link: ${i.competitor_link}</small>` : ''}</td>
       <td>$${parseFloat(i.list_price).toFixed(2)}</td>
       <td>$${parseFloat(i.offer_price).toFixed(2)} (${pct}% off, saves $${savings})</td>
     </tr>`;
