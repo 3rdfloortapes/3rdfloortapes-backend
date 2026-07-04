@@ -1,5 +1,4 @@
 const express = require('express');
-const nodemailer = require('nodemailer');
 const crypto = require('crypto');
 
 const app = express();
@@ -7,21 +6,11 @@ app.use(express.json());
 
 const {
   OWNER_EMAIL = 'support@3rdfloortapes.com',
-  SMTP_HOST = 'smtp.gmail.com',
-  SMTP_PORT = '587',
-  SMTP_USER,
-  SMTP_PASS,
+  RESEND_API_KEY,
+  FROM_EMAIL = 'onboarding@resend.dev',
   API_SECRET = '3rdfloor2026secret',
   PORT = 3000,
 } = process.env;
-
-const transporter = nodemailer.createTransport({
-  host: SMTP_HOST,
-  port: parseInt(SMTP_PORT),
-  secure: false,
-  tls: { rejectUnauthorized: false },
-  auth: { user: SMTP_USER, pass: SMTP_PASS },
-});
 
 app.post('/offers', async (req, res) => {
   try {
@@ -61,13 +50,25 @@ app.post('/offers', async (req, res) => {
       </table>
     `;
 
-    await transporter.sendMail({
-      from: `"3rd Floor Tapes" <${SMTP_USER}>`,
-      to: OWNER_EMAIL,
-      replyTo: buyer_email,
-      subject: `New Offer: ${buyer_name} offered $${parseFloat(offer_price).toFixed(2)} for ${product_title}`,
-      html: emailHtml,
+    const resendRes = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${RESEND_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        from: `3rd Floor Tapes <${FROM_EMAIL}>`,
+        to: OWNER_EMAIL,
+        reply_to: buyer_email,
+        subject: `New Offer: ${buyer_name} offered $${parseFloat(offer_price).toFixed(2)} for ${product_title}`,
+        html: emailHtml,
+      }),
     });
+
+    if (!resendRes.ok) {
+      const errText = await resendRes.text();
+      throw new Error(`Resend error: ${errText}`);
+    }
 
     res.json({ status: 'ok', id });
   } catch (e) {
