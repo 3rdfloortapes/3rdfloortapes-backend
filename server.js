@@ -82,7 +82,7 @@ app.post('/create-setup-session', async (req, res) => {
       customer: customer.id,
       payment_method_types: ['card'],
       success_url: 'https://3rdfloortapes.com/pages/offer-card-saved?session_id={CHECKOUT_SESSION_ID}',
-      cancel_url: 'https://3rdfloortapes.com/pages/offer-card-cancelled',
+      cancel_url: 'https://3rdfloortapes.com/pages/offer-card-setup-cancelled',
     });
 
     res.json({ url: session.url, customer_id: customer.id });
