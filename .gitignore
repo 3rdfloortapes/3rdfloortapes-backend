@@ -1,0 +1,10 @@
+node_modules/
+app.db
+*.backup
+*.pre-*-backup
+add-*.js
+setup-*.js
+*-test.js
+upgrade-*.js
+make-*.js
+offers.db

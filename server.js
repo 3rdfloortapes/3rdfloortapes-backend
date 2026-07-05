@@ -2,6 +2,64 @@ const express = require('express');
 const crypto = require('crypto');
 const Stripe = require('stripe');
 
+const fs = require('fs');
+const initSqlJs = require('sql.js');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+
+const DB_PATH = process.env.DB_PATH || (__dirname + '/app.db');
+const JWT_SECRET = process.env.JWT_SECRET || 'change-this-secret-later';
+
+let SQL;
+let db;
+
+function createFreshSchema(database) {
+  database.run(`
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      email TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      last_active TEXT,
+      is_admin INTEGER DEFAULT 0
+    );
+  `);
+  database.run(`
+    CREATE TABLE IF NOT EXISTS saved_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      item_id TEXT NOT NULL,
+      state TEXT NOT NULL CHECK(state IN ('wishlist','cart')),
+      updated_at TEXT NOT NULL,
+      UNIQUE(user_id, item_id)
+    );
+  `);
+}
+
+async function getDb() {
+  if (!SQL) {
+    SQL = await initSqlJs();
+  }
+  if (!db) {
+    if (fs.existsSync(DB_PATH)) {
+      const fileBuffer = fs.readFileSync(DB_PATH);
+      db = new SQL.Database(fileBuffer);
+    } else {
+      console.log('No database found at', DB_PATH, '- creating a fresh one.');
+      db = new SQL.Database();
+      createFreshSchema(db);
+      const data = db.export();
+      fs.writeFileSync(DB_PATH, Buffer.from(data));
+    }
+  }
+  return db;
+}
+
+function saveDb() {
+  const data = db.export();
+  fs.writeFileSync(DB_PATH, Buffer.from(data));
+}
+
 const app = express();
 app.use(express.json());
 
@@ -136,6 +194,159 @@ app.post('/offers-batch', async (req, res) => {
     console.error('Batch offer error:', e.message);
     res.status(500).json({ error: e.message });
   }
+});
+
+
+app.post('/signup', async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) {
+    return res.status(400).json({ error: 'Email and password are required.' });
+  }
+  const database = await getDb();
+  const password_hash = bcrypt.hashSync(password, 10);
+  const created_at = new Date().toISOString();
+  try {
+    database.run(
+      'INSERT INTO users (email, password_hash, created_at) VALUES (?, ?, ?)',
+      [email, password_hash, created_at]
+    );
+    saveDb();
+  } catch (err) {
+    return res.status(400).json({ error: 'An account with that email already exists.' });
+  }
+  const result = database.exec('SELECT id FROM users WHERE email = ?', [email]);
+  const userId = result[0].values[0][0];
+  const token = jwt.sign({ userId, email }, JWT_SECRET, { expiresIn: '30d' });
+  res.json({ token, email });
+});
+
+app.post('/login', async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) {
+    return res.status(400).json({ error: 'Email and password are required.' });
+  }
+  const database = await getDb();
+  const result = database.exec('SELECT id, email, password_hash FROM users WHERE email = ?', [email]);
+  if (result.length === 0 || result[0].values.length === 0) {
+    return res.status(401).json({ error: 'Incorrect email or password.' });
+  }
+  const [id, foundEmail, storedHash] = result[0].values[0];
+  const matches = bcrypt.compareSync(password, storedHash);
+  if (!matches) {
+    return res.status(401).json({ error: 'Incorrect email or password.' });
+  }
+  database.run('UPDATE users SET last_active = ? WHERE id = ?', [new Date().toISOString(), id]);
+  saveDb();
+  const token = jwt.sign({ userId: id, email: foundEmail }, JWT_SECRET, { expiresIn: '30d' });
+  res.json({ token, email: foundEmail });
+});
+
+
+function requireAuth(req, res, next) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Not logged in.' });
+  }
+  const token = authHeader.slice(7);
+  try {
+    const payload = jwt.verify(token, JWT_SECRET);
+    req.userId = payload.userId;
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: 'Invalid or expired login.' });
+  }
+}
+
+function expireOldCartItems(database) {
+  const cutoff = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+  const now = new Date().toISOString();
+  database.run(
+    "UPDATE saved_items SET state = 'wishlist', updated_at = ? WHERE state = 'cart' AND updated_at < ?",
+    [now, cutoff]
+  );
+}
+
+app.post('/saved-items', requireAuth, async (req, res) => {
+  const { item_id, state } = req.body;
+  if (!item_id || (state !== 'wishlist' && state !== 'cart')) {
+    return res.status(400).json({ error: 'item_id and a valid state (wishlist or cart) are required.' });
+  }
+  const database = await getDb();
+  expireOldCartItems(database);
+  const now = new Date().toISOString();
+  database.run(
+    `INSERT INTO saved_items (user_id, item_id, state, updated_at)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(user_id, item_id) DO UPDATE SET state = ?, updated_at = ?`,
+    [req.userId, item_id, state, now, state, now]
+  );
+  saveDb();
+  res.json({ item_id, state });
+});
+
+app.delete('/saved-items/:item_id', requireAuth, async (req, res) => {
+  const database = await getDb();
+  database.run('DELETE FROM saved_items WHERE user_id = ? AND item_id = ?', [req.userId, req.params.item_id]);
+  saveDb();
+  res.json({ removed: req.params.item_id });
+});
+
+app.get('/saved-items', requireAuth, async (req, res) => {
+  const database = await getDb();
+  expireOldCartItems(database);
+  saveDb();
+  const result = database.exec('SELECT item_id, state, updated_at FROM saved_items WHERE user_id = ?', [req.userId]);
+  const rows = result.length > 0 ? result[0].values : [];
+  const items = rows.map(([item_id, state, updated_at]) => ({ item_id, state, updated_at }));
+  res.json({ items });
+});
+
+app.get('/saved-items/counts/:item_id', async (req, res) => {
+  const database = await getDb();
+  expireOldCartItems(database);
+  saveDb();
+  const result = database.exec(
+    'SELECT state, COUNT(*) as count FROM saved_items WHERE item_id = ? GROUP BY state',
+    [req.params.item_id]
+  );
+  let wishlistCount = 0;
+  let cartCount = 0;
+  if (result.length > 0) {
+    for (const row of result[0].values) {
+      const [state, count] = row;
+      if (state === 'wishlist') wishlistCount = count;
+      if (state === 'cart') cartCount = count;
+    }
+  }
+  res.json({ item_id: req.params.item_id, wishlist_count: wishlistCount, cart_count: cartCount });
+});
+
+
+app.get('/popular', async (req, res) => {
+  const database = await getDb();
+  expireOldCartItems(database);
+  saveDb();
+  const limit = parseInt(req.query.limit, 10) || 15;
+  const result = database.exec(`
+    SELECT
+      item_id,
+      SUM(CASE WHEN state = 'wishlist' THEN 1 ELSE 0 END) AS wishlist_count,
+      SUM(CASE WHEN state = 'cart' THEN 1 ELSE 0 END) AS cart_count,
+      COUNT(*) AS total
+    FROM saved_items
+    GROUP BY item_id
+    ORDER BY total DESC
+    LIMIT ?
+  `, [limit]);
+
+  const rows = result.length > 0 ? result[0].values : [];
+  const items = rows.map(([item_id, wishlist_count, cart_count, total]) => ({
+    item_id,
+    wishlist_count,
+    cart_count,
+    total
+  }));
+  res.json({ items });
 });
 
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
