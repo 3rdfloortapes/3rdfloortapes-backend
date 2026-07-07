@@ -327,6 +327,7 @@ app.get('/popular', async (req, res) => {
   expireOldCartItems(database);
   saveDb();
   const limit = parseInt(req.query.limit, 10) || 15;
+  const minWishlist = parseInt(req.query.minWishlist, 10) || 0;
   const result = database.exec(`
     SELECT
       item_id,
@@ -335,9 +336,10 @@ app.get('/popular', async (req, res) => {
       COUNT(*) AS total
     FROM saved_items
     GROUP BY item_id
-    ORDER BY total DESC
+    HAVING wishlist_count >= ?
+    ORDER BY wishlist_count DESC, total DESC
     LIMIT ?
-  `, [limit]);
+  `, [minWishlist, limit]);
 
   const rows = result.length > 0 ? result[0].values : [];
   const items = rows.map(([item_id, wishlist_count, cart_count, total]) => ({
