@@ -349,6 +349,37 @@ app.get('/popular', async (req, res) => {
   res.json({ items });
 });
 
+
+app.post('/saved-items/counts-bulk', async (req, res) => {
+  const { item_ids } = req.body;
+  if (!Array.isArray(item_ids) || item_ids.length === 0) {
+    return res.status(400).json({ error: 'item_ids must be a non-empty array.' });
+  }
+  const database = await getDb();
+  expireOldCartItems(database);
+  saveDb();
+
+  const placeholders = item_ids.map(() => '?').join(',');
+  const result = database.exec(
+    `SELECT item_id, state, COUNT(*) as count FROM saved_items WHERE item_id IN (${placeholders}) GROUP BY item_id, state`,
+    item_ids
+  );
+
+  const counts = {};
+  item_ids.forEach((id) => { counts[id] = { wishlist_count: 0, cart_count: 0 }; });
+
+  if (result.length > 0) {
+    for (const row of result[0].values) {
+      const [item_id, state, count] = row;
+      if (!counts[item_id]) counts[item_id] = { wishlist_count: 0, cart_count: 0 };
+      if (state === 'wishlist') counts[item_id].wishlist_count = count;
+      if (state === 'cart') counts[item_id].cart_count = count;
+    }
+  }
+
+  res.json({ counts });
+});
+
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
