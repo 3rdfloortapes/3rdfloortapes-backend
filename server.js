@@ -382,6 +382,26 @@ app.post('/saved-items/counts-bulk', async (req, res) => {
   res.json({ counts });
 });
 
+
+app.get('/shopper-alert', requireAuth, async (req, res) => {
+  const database = await getDb();
+  expireOldCartItems(database);
+  saveDb();
+  const limit = parseInt(req.query.limit, 10) || 10;
+  const result = database.exec(
+    `SELECT DISTINCT item_id, MAX(updated_at) as latest
+     FROM saved_items
+     WHERE state = 'cart' AND user_id != ?
+     GROUP BY item_id
+     ORDER BY latest DESC
+     LIMIT ?`,
+    [req.userId, limit]
+  );
+  const rows = result.length > 0 ? result[0].values : [];
+  const items = rows.map(([item_id]) => item_id);
+  res.json({ items });
+});
+
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
