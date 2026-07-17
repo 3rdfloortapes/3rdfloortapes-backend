@@ -68,8 +68,37 @@ const {
   RESEND_API_KEY,
   FROM_EMAIL = 'onboarding@resend.dev',
   STRIPE_SECRET_KEY,
+  SHOPIFY_STORE_DOMAIN,
+  SHOPIFY_CLIENT_ID,
+  SHOPIFY_CLIENT_SECRET,
   PORT = 3000,
 } = process.env;
+
+let shopifyToken = null;
+let shopifyTokenExpiry = 0;
+
+async function getShopifyAccessToken() {
+  if (shopifyToken && Date.now() < shopifyTokenExpiry) {
+    return shopifyToken;
+  }
+  const response = await fetch(`https://${SHOPIFY_STORE_DOMAIN}/admin/oauth/access_token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: SHOPIFY_CLIENT_ID,
+      client_secret: SHOPIFY_CLIENT_SECRET,
+      grant_type: 'client_credentials',
+    }),
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Shopify token error: ${text}`);
+  }
+  const data = await response.json();
+  shopifyToken = data.access_token;
+  shopifyTokenExpiry = Date.now() + (data.expires_in - 60) * 1000;
+  return shopifyToken;
+}
 
 const stripe = Stripe(STRIPE_SECRET_KEY);
 
