@@ -125,6 +125,44 @@ async function sendOfferEmail({ buyer_name, buyer_email, message, open_to_counte
   }
 }
 
+async function sendOfferDecisionEmail({ buyer_name, buyer_email, items, status }) {
+  const total = items.reduce((sum, i) => sum + parseFloat(i.offer_price), 0);
+  const itemRows = items.map((i) => `<li>${i.product_title} — $${parseFloat(i.offer_price).toFixed(2)}</li>`).join('');
+
+  const subject = status === 'accepted'
+    ? 'Your offer was accepted! — 3rd Floor Tapes'
+    : 'Update on your offer — 3rd Floor Tapes';
+
+  const bodyHtml = status === 'accepted'
+    ? `<h2>Good news, ${buyer_name}!</h2>
+       <p>Your offer of $${total.toFixed(2)} for the following item(s) has been accepted:</p>
+       <ul>${itemRows}</ul>
+       <p>We'll be in touch shortly to complete your order.</p>`
+    : `<h2>Hi ${buyer_name},</h2>
+       <p>Thanks for your offer on the following item(s):</p>
+       <ul>${itemRows}</ul>
+       <p>Unfortunately we're not able to accept this offer at this time. Feel free to check back or make another offer anytime!</p>`;
+
+  const resendRes = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${RESEND_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      from: `3rd Floor Tapes <${FROM_EMAIL}>`,
+      to: buyer_email,
+      subject,
+      html: bodyHtml,
+    }),
+  });
+
+  if (!resendRes.ok) {
+    const errText = await resendRes.text();
+    throw new Error(`Resend error: ${errText}`);
+  }
+}
+
 // Create a Stripe Checkout Session in setup mode — saves a card, charges nothing
 app.post('/create-setup-session', async (req, res) => {
   try {
@@ -459,6 +497,35 @@ app.get('/admin/offers', requireAuth, requireAdmin, async (req, res) => {
     updated_at,
   }));
   res.json({ offers });
+});
+
+
+app.post('/admin/offers/:id/decision', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const { status } = req.body;
+    if (status !== 'accepted' && status !== 'declined') {
+      return res.status(400).json({ error: 'status must be accepted or declined.' });
+    }
+
+    const database = await getDb();
+    const result = database.exec('SELECT buyer_name, buyer_email, items FROM offers WHERE id = ?', [req.params.id]);
+    if (result.length === 0 || result[0].values.length === 0) {
+      return res.status(404).json({ error: 'Offer not found.' });
+    }
+    const [buyer_name, buyer_email, itemsJson] = result[0].values[0];
+
+    const now = new Date().toISOString();
+    database.run('UPDATE offers SET status = ?, updated_at = ? WHERE id = ?', [status, now, req.params.id]);
+    saveDb();
+
+    const items = JSON.parse(itemsJson);
+    await sendOfferDecisionEmail({ buyer_name, buyer_email, items, status });
+
+    res.json({ status: 'ok' });
+  } catch (e) {
+    console.error('Offer decision error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
