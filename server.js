@@ -226,11 +226,11 @@ app.post('/login', async (req, res) => {
     return res.status(400).json({ error: 'Email and password are required.' });
   }
   const database = await getDb();
-  const result = database.exec('SELECT id, email, password_hash FROM users WHERE email = ?', [email]);
+  const result = database.exec('SELECT id, email, password_hash, is_admin FROM users WHERE email = ?', [email]);
   if (result.length === 0 || result[0].values.length === 0) {
     return res.status(401).json({ error: 'Incorrect email or password.' });
   }
-  const [id, foundEmail, storedHash] = result[0].values[0];
+  const [id, foundEmail, storedHash, is_admin] = result[0].values[0];
   const matches = bcrypt.compareSync(password, storedHash);
   if (!matches) {
     return res.status(401).json({ error: 'Incorrect email or password.' });
@@ -238,7 +238,7 @@ app.post('/login', async (req, res) => {
   database.run('UPDATE users SET last_active = ? WHERE id = ?', [new Date().toISOString(), id]);
   saveDb();
   const token = jwt.sign({ userId: id, email: foundEmail }, JWT_SECRET, { expiresIn: '30d' });
-  res.json({ token, email: foundEmail });
+  res.json({ token, email: foundEmail, is_admin: !!is_admin });
 });
 
 
