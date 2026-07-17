@@ -257,6 +257,16 @@ function requireAuth(req, res, next) {
   }
 }
 
+async function requireAdmin(req, res, next) {
+  const database = await getDb();
+  const result = database.exec('SELECT is_admin FROM users WHERE id = ?', [req.userId]);
+  const isAdmin = result.length > 0 && result[0].values.length > 0 && result[0].values[0][0] === 1;
+  if (!isAdmin) {
+    return res.status(403).json({ error: 'Admin access required.' });
+  }
+  next();
+}
+
 function expireOldCartItems(database) {
   const cutoff = new Date(Date.now() - 30 * 60 * 1000).toISOString();
   const now = new Date().toISOString();
