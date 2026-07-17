@@ -412,6 +412,23 @@ app.get('/shopper-alert', requireAuth, async (req, res) => {
   res.json({ items });
 });
 
+
+app.get('/admin/users', requireAuth, requireAdmin, async (req, res) => {
+  const database = await getDb();
+  const result = database.exec(
+    'SELECT id, email, created_at, last_active, is_admin FROM users ORDER BY created_at DESC'
+  );
+  const rows = result.length > 0 ? result[0].values : [];
+  const users = rows.map(([id, email, created_at, last_active, is_admin]) => ({
+    id,
+    email,
+    created_at,
+    last_active,
+    is_admin: !!is_admin,
+  }));
+  res.json({ users });
+});
+
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
