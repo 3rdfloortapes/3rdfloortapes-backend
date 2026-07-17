@@ -439,6 +439,28 @@ app.get('/admin/users', requireAuth, requireAdmin, async (req, res) => {
   res.json({ users });
 });
 
+
+app.get('/admin/offers', requireAuth, requireAdmin, async (req, res) => {
+  const database = await getDb();
+  const result = database.exec(
+    'SELECT id, buyer_name, buyer_email, message, open_to_counter, items, status, counter_note, created_at, updated_at FROM offers ORDER BY created_at DESC'
+  );
+  const rows = result.length > 0 ? result[0].values : [];
+  const offers = rows.map(([id, buyer_name, buyer_email, message, open_to_counter, items, status, counter_note, created_at, updated_at]) => ({
+    id,
+    buyer_name,
+    buyer_email,
+    message,
+    open_to_counter: !!open_to_counter,
+    items: JSON.parse(items),
+    status,
+    counter_note,
+    created_at,
+    updated_at,
+  }));
+  res.json({ offers });
+});
+
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
