@@ -102,6 +102,25 @@ async function getShopifyAccessToken() {
 
 const stripe = Stripe(STRIPE_SECRET_KEY);
 
+async function chargeOfferCard(stripeCustomerId, amountDollars) {
+  const paymentMethods = await stripe.paymentMethods.list({ customer: stripeCustomerId, type: 'card' });
+  if (paymentMethods.data.length === 0) {
+    throw new Error('No saved card found for this customer.');
+  }
+  const paymentMethod = paymentMethods.data[paymentMethods.data.length - 1];
+
+  const paymentIntent = await stripe.paymentIntents.create({
+    amount: Math.round(amountDollars * 100),
+    currency: 'usd',
+    customer: stripeCustomerId,
+    payment_method: paymentMethod.id,
+    off_session: true,
+    confirm: true,
+  });
+
+  return paymentIntent;
+}
+
 async function sendOfferEmail({ buyer_name, buyer_email, message, open_to_counter, items, id, card_on_file }) {
   const total = items.reduce((sum, i) => sum + parseFloat(i.offer_price), 0);
 
