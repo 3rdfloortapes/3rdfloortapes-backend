@@ -121,6 +121,70 @@ async function chargeOfferCard(stripeCustomerId, amountDollars) {
   return paymentIntent;
 }
 
+async function createShopifyOrder({ buyer_name, buyer_email, items }) {
+  const token = await getShopifyAccessToken();
+
+  const nameParts = buyer_name.trim().split(' ');
+  const firstName = nameParts[0] || buyer_name;
+  const lastName = nameParts.slice(1).join(' ') || '';
+
+  const lineItems = items.map((i) => ({
+    variantId: i.variant_id,
+    quantity: 1,
+    priceSet: {
+      shopMoney: {
+        amount: String(i.offer_price),
+        currencyCode: 'USD',
+      },
+    },
+  }));
+
+  const mutation = `
+    mutation orderCreate($order: OrderCreateOrderInput!) {
+      orderCreate(order: $order) {
+        userErrors { field message }
+        order { id name }
+      }
+    }
+  `;
+
+  const variables = {
+    order: {
+      lineItems,
+      email: buyer_email,
+      customer: {
+        toUpsert: {
+          email: buyer_email,
+          firstName,
+          lastName,
+        },
+      },
+      financialStatus: 'PAID',
+      tags: ['App Offer Accepted'],
+    },
+  };
+
+  const response = await fetch(`https://${SHOPIFY_STORE_DOMAIN}/admin/api/2026-07/graphql.json`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Shopify-Access-Token': token,
+    },
+    body: JSON.stringify({ query: mutation, variables }),
+  });
+
+  const data = await response.json();
+
+  if (data.errors) {
+    throw new Error(`Shopify GraphQL error: ${JSON.stringify(data.errors)}`);
+  }
+  if (data.data.orderCreate.userErrors.length > 0) {
+    throw new Error(`Shopify order error: ${JSON.stringify(data.data.orderCreate.userErrors)}`);
+  }
+
+  return data.data.orderCreate.order;
+}
+
 async function sendOfferEmail({ buyer_name, buyer_email, message, open_to_counter, items, id, card_on_file }) {
   const total = items.reduce((sum, i) => sum + parseFloat(i.offer_price), 0);
 
@@ -556,20 +620,51 @@ app.post('/admin/offers/:id/decision', requireAuth, requireAdmin, async (req, re
     }
 
     const database = await getDb();
-    const result = database.exec('SELECT buyer_name, buyer_email, items FROM offers WHERE id = ?', [req.params.id]);
+    const result = database.exec('SELECT buyer_name, buyer_email, items, stripe_customer_id FROM offers WHERE id = ?', [req.params.id]);
     if (result.length === 0 || result[0].values.length === 0) {
       return res.status(404).json({ error: 'Offer not found.' });
     }
-    const [buyer_name, buyer_email, itemsJson] = result[0].values[0];
-
+    const [buyer_name, buyer_email, itemsJson, stripe_customer_id] = result[0].values[0];
+    const items = JSON.parse(itemsJson);
     const now = new Date().toISOString();
-    database.run('UPDATE offers SET status = ?, updated_at = ? WHERE id = ?', [status, now, req.params.id]);
+
+    if (status === 'declined') {
+      database.run('UPDATE offers SET status = ?, updated_at = ? WHERE id = ?', [status, now, req.params.id]);
+      saveDb();
+      await sendOfferDecisionEmail({ buyer_name, buyer_email, items, status });
+      return res.json({ status: 'ok' });
+    }
+
+    // status === 'accepted': charge the card first, only then create the order.
+    if (!stripe_customer_id) {
+      return res.status(400).json({ error: 'No card on file for this offer - cannot accept.' });
+    }
+
+    const total = items.reduce((sum, i) => sum + parseFloat(i.offer_price), 0);
+
+    let paymentIntent;
+    try {
+      paymentIntent = await chargeOfferCard(stripe_customer_id, total);
+    } catch (chargeError) {
+      console.error('Offer charge failed:', chargeError.message);
+      return res.status(402).json({ error: `Charge failed: ${chargeError.message}` });
+    }
+
+    let orderNote = null;
+    try {
+      const order = await createShopifyOrder({ buyer_name, buyer_email, items });
+      orderNote = `Shopify order created: ${order.name}`;
+    } catch (orderError) {
+      console.error('Shopify order creation failed after successful charge:', orderError.message);
+      orderNote = `CHARGED (payment intent ${paymentIntent.id}) BUT SHOPIFY ORDER CREATION FAILED: ${orderError.message} - create this order manually.`;
+    }
+
+    database.run('UPDATE offers SET status = ?, updated_at = ?, counter_note = ? WHERE id = ?', [status, now, orderNote, req.params.id]);
     saveDb();
 
-    const items = JSON.parse(itemsJson);
     await sendOfferDecisionEmail({ buyer_name, buyer_email, items, status });
 
-    res.json({ status: 'ok' });
+    res.json({ status: 'ok', note: orderNote });
   } catch (e) {
     console.error('Offer decision error:', e.message);
     res.status(500).json({ error: e.message });
