@@ -557,6 +557,16 @@ app.post('/admin/offers/:id/decision', requireAuth, requireAdmin, async (req, re
   }
 });
 
+
+app.get('/admin/shopify-token-test', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    await getShopifyAccessToken();
+    res.json({ success: true, message: 'Successfully fetched a Shopify access token.' });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
