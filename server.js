@@ -184,6 +184,16 @@ app.post('/offers-batch', async (req, res) => {
     }
 
     const id = crypto.randomUUID();
+
+    const database = await getDb();
+    const now = new Date().toISOString();
+    database.run(
+      `INSERT INTO offers (id, buyer_name, buyer_email, message, open_to_counter, items, status, stripe_customer_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
+      [id, buyer_name, buyer_email, message || null, open_to_counter ? 1 : 0, JSON.stringify(items), stripe_customer_id || null, now, now]
+    );
+    saveDb();
+
     await sendOfferEmail({
       buyer_name, buyer_email, message, open_to_counter, items, id,
       card_on_file: !!stripe_customer_id,
