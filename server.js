@@ -681,6 +681,36 @@ app.get('/admin/shopify-token-test', requireAuth, requireAdmin, async (req, res)
   }
 });
 
+
+app.get('/featured-collections', async (req, res) => {
+  const database = await getDb();
+  const result = database.exec('SELECT handle FROM featured_collections ORDER BY position');
+  const rows = result.length > 0 ? result[0].values : [];
+  const handles = rows.map(([handle]) => handle);
+  res.json({ handles });
+});
+
+app.put('/admin/featured-collections', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const { handles } = req.body;
+    if (!Array.isArray(handles) || handles.length === 0) {
+      return res.status(400).json({ error: 'handles must be a non-empty array.' });
+    }
+
+    const database = await getDb();
+    database.run('DELETE FROM featured_collections');
+    handles.forEach((handle, i) => {
+      database.run('INSERT INTO featured_collections (handle, position) VALUES (?, ?)', [handle, i]);
+    });
+    saveDb();
+
+    res.json({ status: 'ok', handles });
+  } catch (e) {
+    console.error('Update featured collections error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
