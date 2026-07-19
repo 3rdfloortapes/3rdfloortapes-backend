@@ -62,6 +62,7 @@ function saveDb() {
 
 const app = express();
 app.use(express.json());
+app.use('/public', express.static('public'));
 
 const {
   OWNER_EMAIL = 'support@3rdfloortapes.com',
