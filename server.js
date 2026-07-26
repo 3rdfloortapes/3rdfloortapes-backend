@@ -34,6 +34,19 @@ function createFreshSchema(database) {
       UNIQUE(user_id, item_id)
     );
   `);
+  // SHOPPER ALERT (storefront) - included here for brand-new installs,
+  // but see the unconditional creation below getDb()'s if/else - that's
+  // what actually guarantees this table exists on the EXISTING production
+  // database, since createFreshSchema() only ever runs once, on first-ever
+  // startup with no db file present.
+  database.run(`
+    CREATE TABLE IF NOT EXISTS storefront_cart_activity (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      product_id TEXT,
+      product_title TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+  `);
 }
 
 async function getDb() {
@@ -51,6 +64,20 @@ async function getDb() {
       const data = db.export();
       fs.writeFileSync(DB_PATH, Buffer.from(data));
     }
+    // SHOPPER ALERT (storefront) - runs every time regardless of whether
+    // the db file already existed, so this table gets created on the
+    // EXISTING production database the first time this updated server
+    // starts, not just on a fresh install. IF NOT EXISTS makes this safe
+    // to run every time without affecting anything already there.
+    db.run(`
+      CREATE TABLE IF NOT EXISTS storefront_cart_activity (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        product_id TEXT,
+        product_title TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+    `);
+    saveDb();
   }
   return db;
 }
@@ -63,6 +90,29 @@ function saveDb() {
 const app = express();
 app.use(express.json());
 app.use('/public', express.static('public'));
+
+// SHOPPER ALERT (storefront) - CORS middleware. Required so the actual
+// Shopify storefront (a different origin than this backend) can call the
+// new storefront routes below. Restricted to your two real domains only,
+// not a wildcard, so this doesn't open the API to arbitrary sites.
+// This does NOT affect any existing route or behavior - it only adds
+// permission headers for the listed origins.
+app.use((req, res, next) => {
+  const allowedOrigins = [
+    'https://www.3rdfloortapes.com',
+    'https://3rdfloortapes.com',
+  ];
+  const origin = req.headers.origin;
+  if (allowedOrigins.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  }
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+  next();
+});
 
 const {
   OWNER_EMAIL = 'support@3rdfloortapes.com',
@@ -571,6 +621,64 @@ app.get('/shopper-alert', requireAuth, async (req, res) => {
   const rows = result.length > 0 ? result[0].values : [];
   const items = rows.map(([item_id]) => item_id);
   res.json({ items });
+});
+
+
+// ============================================================
+// SHOPPER ALERT (storefront) - NEW routes below.
+// These are separate and additional to the app-only /shopper-alert
+// route above - that one requires app login (requireAuth) and reads
+// from saved_items, which only the app writes to. Storefront visitors
+// aren't logged into the app, so they need their own, unauthenticated
+// path writing to a separate table (storefront_cart_activity).
+// Nothing above this comment block was changed.
+// ============================================================
+
+function expireOldStorefrontActivity(database) {
+  const cutoff = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+  database.run(
+    'DELETE FROM storefront_cart_activity WHERE created_at < ?',
+    [cutoff]
+  );
+}
+
+// Log a real add-to-cart from the actual Shopify storefront. No auth -
+// storefront visitors aren't logged into the app. No user identity is
+// ever captured - this only ever needs to know WHAT was added, never WHO.
+app.post('/storefront-cart-ping', async (req, res) => {
+  const { product_id, product_title } = req.body;
+  if (!product_title) {
+    return res.status(400).json({ error: 'product_title is required.' });
+  }
+  const database = await getDb();
+  expireOldStorefrontActivity(database);
+  const now = new Date().toISOString();
+  database.run(
+    'INSERT INTO storefront_cart_activity (product_id, product_title, created_at) VALUES (?, ?, ?)',
+    [product_id || null, product_title, now]
+  );
+  saveDb();
+  res.json({ ok: true });
+});
+
+// Public read endpoint for the storefront ticker - recent distinct
+// titles, newest first, last 30 minutes only (same window used
+// elsewhere for cart-to-wishlist expiry).
+app.get('/storefront-shopper-alert', async (req, res) => {
+  const database = await getDb();
+  expireOldStorefrontActivity(database);
+  const limit = parseInt(req.query.limit, 10) || 10;
+  const result = database.exec(
+    `SELECT product_title, MAX(created_at) as latest
+     FROM storefront_cart_activity
+     GROUP BY product_title
+     ORDER BY latest DESC
+     LIMIT ?`,
+    [limit]
+  );
+  const rows = result.length > 0 ? result[0].values : [];
+  const titles = rows.map(([title]) => title);
+  res.json({ titles });
 });
 
 
