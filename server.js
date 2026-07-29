@@ -820,6 +820,91 @@ app.put('/admin/featured-collections', requireAuth, requireAdmin, async (req, re
   }
 });
 
+
+app.get('/fire-department', async (req, res) => {
+  try {
+    const database = await getDb();
+    expireOldCartItems(database);
+    saveDb();
+    const limit = parseInt(req.query.limit, 10) || 8;
+    const threshold = parseInt(req.query.threshold, 10) || 2;
+
+    const result = database.exec(`
+      SELECT item_id, SUM(CASE WHEN state = 'wishlist' THEN 1 ELSE 0 END) AS wishlist_count
+      FROM saved_items
+      GROUP BY item_id
+      HAVING wishlist_count >= ?
+      ORDER BY wishlist_count DESC
+      LIMIT ?
+    `, [threshold, limit]);
+
+    const rows = result.length > 0 ? result[0].values : [];
+    const popular = rows.map(([item_id, wishlist_count]) => ({ item_id, wishlist_count }));
+
+    if (popular.length === 0) {
+      return res.json({ items: [] });
+    }
+
+    const token = await getShopifyAccessToken();
+    const gids = popular.map((p) => p.item_id);
+
+    const query = `
+      query($ids: [ID!]!) {
+        nodes(ids: $ids) {
+          ... on Product {
+            id
+            title
+            handle
+            featuredImage { url }
+            priceRangeV2 { minVariantPrice { amount currencyCode } }
+          }
+        }
+      }
+    `;
+
+    const response = await fetch(`https://${SHOPIFY_STORE_DOMAIN}/admin/api/2026-07/graphql.json`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Shopify-Access-Token': token,
+      },
+      body: JSON.stringify({ query, variables: { ids: gids } }),
+    });
+
+    const data = await response.json();
+    if (data.errors) {
+      console.error('Fire Department Admin API error:', data.errors);
+      return res.status(500).json({ error: 'Shopify Admin API error', details: data.errors });
+    }
+
+    const nodes = (data.data && data.data.nodes ? data.data.nodes : []).filter(Boolean);
+    const byId = {};
+    nodes.forEach((n) => { byId[n.id] = n; });
+
+    const items = popular
+      .map((p) => {
+        const product = byId[p.item_id];
+        if (!product) return null;
+        return {
+          item_id: p.item_id,
+          wishlist_count: p.wishlist_count,
+          title: product.title,
+          handle: product.handle,
+          image: product.featuredImage ? product.featuredImage.url : null,
+          price: product.priceRangeV2 && product.priceRangeV2.minVariantPrice
+            ? product.priceRangeV2.minVariantPrice.amount
+            : null,
+        };
+      })
+      .filter(Boolean);
+
+    res.json({ items });
+  } catch (e) {
+    console.error('Fire Department route error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
