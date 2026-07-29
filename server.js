@@ -122,6 +122,7 @@ const {
   SHOPIFY_STORE_DOMAIN,
   SHOPIFY_CLIENT_ID,
   SHOPIFY_CLIENT_SECRET,
+  SHOPIFY_ACCESS_TOKEN,
   PORT = 3000,
 } = process.env;
 
@@ -129,6 +130,9 @@ let shopifyToken = null;
 let shopifyTokenExpiry = 0;
 
 async function getShopifyAccessToken() {
+  if (SHOPIFY_ACCESS_TOKEN) {
+    return SHOPIFY_ACCESS_TOKEN;
+  }
   if (shopifyToken && Date.now() < shopifyTokenExpiry) {
     return shopifyToken;
   }
