@@ -493,6 +493,7 @@ function requireShopifyCustomer(req, res, next) {
   }
 
   req.shopifyCustomerId = customerId;
+  req.userId = customerId;
   next();
 }
 
@@ -530,7 +531,7 @@ function expireOldCartItems(database) {
   );
 }
 
-app.post('/saved-items', requireAuth, async (req, res) => {
+app.post('/saved-items', requireShopifyCustomer, async (req, res) => {
   const { item_id, state } = req.body;
   if (!item_id || (state !== 'wishlist' && state !== 'cart')) {
     return res.status(400).json({ error: 'item_id and a valid state (wishlist or cart) are required.' });
@@ -548,14 +549,14 @@ app.post('/saved-items', requireAuth, async (req, res) => {
   res.json({ item_id, state });
 });
 
-app.delete('/saved-items/:item_id', requireAuth, async (req, res) => {
+app.delete('/saved-items/:item_id', requireShopifyCustomer, async (req, res) => {
   const database = await getDb();
   database.run('DELETE FROM saved_items WHERE user_id = ? AND item_id = ?', [req.userId, req.params.item_id]);
   saveDb();
   res.json({ removed: req.params.item_id });
 });
 
-app.get('/saved-items', requireAuth, async (req, res) => {
+app.get('/saved-items', requireShopifyCustomer, async (req, res) => {
   const database = await getDb();
   expireOldCartItems(database);
   saveDb();
