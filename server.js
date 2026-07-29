@@ -457,6 +457,45 @@ app.post('/login', async (req, res) => {
 });
 
 
+
+function requireShopifyCustomer(req, res, next) {
+  const providedSignature = String(req.query.signature || '');
+  const customerId = String(req.query.logged_in_customer_id || '');
+
+  if (!providedSignature) {
+    return res.status(401).json({ error: 'Missing Shopify proxy signature.' });
+  }
+
+  const message = Object.keys(req.query)
+    .filter((key) => key !== 'signature')
+    .sort()
+    .map((key) => `${key}=${Array.isArray(req.query[key]) ? req.query[key].join(',') : req.query[key]}`)
+    .join('');
+
+  const expectedSignature = crypto
+    .createHmac('sha256', SHOPIFY_CLIENT_SECRET)
+    .update(message)
+    .digest('hex');
+
+  const valid =
+    providedSignature.length === expectedSignature.length &&
+    crypto.timingSafeEqual(
+      Buffer.from(providedSignature, 'utf8'),
+      Buffer.from(expectedSignature, 'utf8')
+    );
+
+  if (!valid) {
+    return res.status(401).json({ error: 'Invalid Shopify proxy signature.' });
+  }
+
+  if (!customerId) {
+    return res.status(401).json({ error: 'Shopify customer login required.' });
+  }
+
+  req.shopifyCustomerId = customerId;
+  next();
+}
+
 function requireAuth(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -911,6 +950,7 @@ app.get('/fire-department', async (req, res) => {
 
 app.get('/', (req, res) => res.json({ status: 'ok', source: 'shopify-app-proxy' }));
 app.get('/proxy-inspect', (req, res) => res.json({ query: req.query, headers: req.headers }));
+app.get('/customer-test', requireShopifyCustomer, (req, res) => res.json({ status: 'ok', shopify_customer_id: req.shopifyCustomerId }));
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
