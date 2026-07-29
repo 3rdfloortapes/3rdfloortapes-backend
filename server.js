@@ -909,6 +909,7 @@ app.get('/fire-department', async (req, res) => {
   }
 });
 
+app.get('/', (req, res) => res.json({ status: 'ok', source: 'shopify-app-proxy' }));
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
