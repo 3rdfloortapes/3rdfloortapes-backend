@@ -544,7 +544,7 @@ app.post('/saved-items', requireShopifyCustomer, async (req, res) => {
     `INSERT INTO saved_items (user_id, item_id, state, updated_at)
      VALUES (?, ?, ?, ?)
      ON CONFLICT(user_id, item_id) DO UPDATE SET state = ?, updated_at = ?`,
-    [req.userId, item_id, state, now, state, now]
+    [req.userId, toNumericId(item_id), state, now, state, now]
   );
   saveDb();
   res.json({ item_id, state });
@@ -552,7 +552,7 @@ app.post('/saved-items', requireShopifyCustomer, async (req, res) => {
 
 app.delete('/saved-items/:item_id', requireShopifyCustomer, async (req, res) => {
   const database = await getDb();
-  database.run('DELETE FROM saved_items WHERE user_id = ? AND item_id = ?', [req.userId, req.params.item_id]);
+  database.run('DELETE FROM saved_items WHERE user_id = ? AND item_id = ?', [req.userId, toNumericId(req.params.item_id)]);
   saveDb();
   res.json({ removed: req.params.item_id });
 });
@@ -573,7 +573,7 @@ app.get('/saved-items/counts/:item_id', async (req, res) => {
   saveDb();
   const result = database.exec(
     'SELECT state, COUNT(*) as count FROM saved_items WHERE item_id = ? GROUP BY state',
-    [req.params.item_id]
+    [toNumericId(req.params.item_id)]
   );
   let wishlistCount = 0;
   let cartCount = 0;
@@ -870,6 +870,7 @@ app.get('/fire-department', async (req, res) => {
   try {
     const database = await getDb();
     expireOldCartItems(database);
+    normalizeSavedItemIds(database);
     saveDb();
     const limit = parseInt(req.query.limit, 10) || 8;
     const threshold = parseInt(req.query.threshold, 10) || 2;
@@ -891,7 +892,7 @@ app.get('/fire-department', async (req, res) => {
     }
 
     const token = await getShopifyAccessToken();
-    const gids = popular.map((p) => p.item_id);
+    const gids = popular.map((p) => toProductGid(p.item_id));
 
     const query = `
       query($ids: [ID!]!) {
@@ -928,7 +929,7 @@ app.get('/fire-department', async (req, res) => {
 
     const items = popular
       .map((p) => {
-        const product = byId[p.item_id];
+        const product = byId[toProductGid(p.item_id)];
         if (!product) return null;
         return {
           item_id: p.item_id,
@@ -1008,3 +1009,60 @@ registerSavedItemsDetailsRoute({
     return data.data;
   },
 });
+
+
+// ---------------------------------------------------------------------------
+// ITEM ID NORMALIZATION
+// Canonical storage form for saved_items.item_id is a BARE NUMERIC string.
+// Shopify GraphQL requires a full GID, so convert only at that boundary.
+// (Function declarations hoist, so these are usable above.)
+// ---------------------------------------------------------------------------
+function toNumericId(value) {
+  if (value === null || value === undefined) return null;
+  const match = String(value).match(/(\d+)$/);
+  return match ? match[1] : null;
+}
+
+function toProductGid(value) {
+  const raw = String(value == null ? '' : value);
+  if (raw.startsWith('gid://')) return raw;
+  return 'gid://shopify/Product/' + raw;
+}
+
+let savedItemIdsNormalized = false;
+function normalizeSavedItemIds(database) {
+  if (savedItemIdsNormalized) return;
+
+  const check = database.exec(
+    "SELECT COUNT(*) FROM saved_items WHERE item_id LIKE 'gid://%'"
+  );
+  const pending = check.length > 0 ? check[0].values[0][0] : 0;
+  if (!pending) {
+    savedItemIdsNormalized = true;
+    return;
+  }
+
+  console.log('[normalize] converting ' + pending + ' GID rows to numeric');
+
+  // Drop the GID row when a numeric row already exists for the same
+  // user + product. Keeps the storefront row, which is the newer format.
+  database.run(`
+    DELETE FROM saved_items
+     WHERE item_id LIKE 'gid://shopify/Product/%'
+       AND EXISTS (
+         SELECT 1 FROM saved_items other
+          WHERE other.user_id = saved_items.user_id
+            AND other.item_id = replace(saved_items.item_id, 'gid://shopify/Product/', '')
+       )
+  `);
+
+  database.run(`
+    UPDATE saved_items
+       SET item_id = replace(item_id, 'gid://shopify/Product/', '')
+     WHERE item_id LIKE 'gid://shopify/Product/%'
+  `);
+
+  saveDb();
+  savedItemIdsNormalized = true;
+  console.log('[normalize] done');
+}
