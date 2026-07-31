@@ -1066,3 +1066,25 @@ function normalizeSavedItemIds(database) {
   savedItemIdsNormalized = true;
   console.log('[normalize] done');
 }
+
+// ===== TEMP PURGE ENDPOINT - REMOVE AFTER USE =====
+app.post('/admin-purge-saved-items', async (req, res) => {
+  if (req.query.secret !== '60d79834a35baf7f4c0a80b5a691c9ace449bf7a27f320a1') {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  try {
+    const database = await getDb();
+    const before = database.exec('SELECT COUNT(*) FROM saved_items');
+    const total = before.length > 0 ? before[0].values[0][0] : 0;
+    database.run('DELETE FROM saved_items');
+    saveDb();
+    const after = database.exec('SELECT COUNT(*) FROM saved_items');
+    const remaining = after.length > 0 ? after[0].values[0][0] : 0;
+    console.log('[purge] deleted ' + total + ' saved_items rows');
+    res.json({ purged: total, remaining });
+  } catch (e) {
+    console.error('[purge] failed:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+// ===== END TEMP PURGE ENDPOINT =====
