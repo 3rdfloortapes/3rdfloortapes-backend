@@ -1225,6 +1225,8 @@ app.post('/storefront-offers', requireShopifyCustomer, async (req, res) => {
 
     const session = await stripe.checkout.sessions.create({
       mode: 'setup',
+      // Required on setup-mode sessions in current Stripe API versions.
+      currency: 'usd',
       customer: stripeCustomer.id,
       success_url:
         'https://3rdfloortapes.com/pages/offer-card-saved?session_id={CHECKOUT_SESSION_ID}',
