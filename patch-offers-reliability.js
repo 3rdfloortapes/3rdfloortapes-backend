@@ -76,8 +76,8 @@ edit(
 // 4. Make sure the columns exist and stale rows get expired before inserting.
 edit(
   'storefront offer creation runs schema + cleanup',
-  "    const database = await getDb();\n    database.run(",
-  "    const database = await getDb();\n    ensureOfferColumns(database);\n    expirePendingCardOffers(database);\n    database.run("
+  "    const database = await getDb();\n    database.run(\n      `INSERT INTO offers (id, buyer_name, buyer_email, message, open_to_counter, items, status, stripe_customer_id, shopify_customer_id, created_at, updated_at)",
+  "    const database = await getDb();\n    ensureOfferColumns(database);\n    expirePendingCardOffers(database);\n    database.run(\n      `INSERT INTO offers (id, buyer_name, buyer_email, message, open_to_counter, items, status, stripe_customer_id, shopify_customer_id, created_at, updated_at)"
 );
 
 if (failed) {
