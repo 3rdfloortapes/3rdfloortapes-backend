@@ -188,13 +188,23 @@ async function createOfferFromSession(session) {
     return offerId; // already created
   }
 
+  // variant_id MUST be a full GID: createShopifyOrder() feeds it straight into
+  // a GraphQL mutation when an offer is accepted, and that requires a GID.
+  // This matches what the app writes.
+  const variantGid = m.variant_id
+    ? (String(m.variant_id).startsWith('gid://')
+        ? String(m.variant_id)
+        : 'gid://shopify/ProductVariant/' + String(m.variant_id))
+    : null;
+
   const items = [
     {
       product_title: m.product_title || '',
       product_id: m.product_id || null,
-      variant_id: m.variant_id || null,
+      variant_id: variantGid,
       list_price: m.list_price || null,
       offer_price: m.offer_price || null,
+      competitor_link: m.price_match_link || null,
     },
   ];
 
@@ -218,6 +228,23 @@ async function createOfferFromSession(session) {
   );
   saveDb();
   console.log('[storefront-offers] created offer', offerId);
+
+  // Same notification the app's /offers-batch sends. Failure here must not
+  // undo the offer - it's already saved and visible in the admin queue.
+  try {
+    await sendOfferEmail({
+      buyer_name: m.buyer_name || '',
+      buyer_email: m.buyer_email || '',
+      message: m.offer_message || null,
+      open_to_counter: m.open_to_counter !== '0',
+      items,
+      id: offerId,
+      card_on_file: true,
+    });
+  } catch (e) {
+    console.error('[storefront-offers] offer saved but email failed:', e.message);
+  }
+
   return offerId;
 }
 
@@ -316,9 +343,12 @@ app.post('/shopify-order-webhook', async (req, res) => {
       } catch (e) {
         continue;
       }
-      const hit = (items || []).some((item) =>
-        soldVariantIds.includes(String(item.variant_id))
-      );
+      // Stored variant ids are GIDs; Shopify's webhook sends bare numbers.
+      // Compare on the numeric tail so both formats match.
+      const hit = (items || []).some((item) => {
+        const tail = String(item.variant_id || '').replace(/^.*\//, '');
+        return tail && soldVariantIds.includes(tail);
+      });
       if (!hit) continue;
 
       // 'declined' is the closest allowed status; void_reason carries the why.
