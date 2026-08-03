@@ -1271,8 +1271,12 @@ async function createOfferFromSession(session) {
       product_title: m.product_title || '',
       product_id: m.product_id || null,
       variant_id: variantGid,
-      list_price: m.list_price || null,
-      offer_price: m.offer_price || null,
+      // MUST be numbers, not strings. The app's admin dashboard does
+      //   items.reduce((sum, i) => sum + (i.offer_price ?? 0), 0).toFixed(2)
+      // and a string turns that reduce into concatenation, producing a string
+      // with no .toFixed() - which crashes the whole dashboard.
+      list_price: m.list_price ? parseFloat(m.list_price) : null,
+      offer_price: m.offer_price ? parseFloat(m.offer_price) : null,
       competitor_link: m.price_match_link || null,
     },
   ];
@@ -1435,3 +1439,40 @@ app.post('/shopify-order-webhook', async (req, res) => {
   }
 });
 // ===== END STOREFRONT OFFERS =====
+
+
+// ===== TEMP: one-time repair of string prices in offers.items =====
+// Early storefront offers stored offer_price/list_price as strings, which
+// crashes the app dashboard's reduce().toFixed(). Converts them to numbers.
+app.post('/admin-repair-offer-prices', async (req, res) => {
+  if (req.query.secret !== 'repair-offer-prices-once') {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  try {
+    const database = await getDb();
+    const result = database.exec('SELECT id, items FROM offers');
+    const rows = result.length ? result[0].values : [];
+    let fixed = 0;
+    for (const [id, itemsJson] of rows) {
+      let items;
+      try { items = JSON.parse(itemsJson); } catch (e) { continue; }
+      if (!Array.isArray(items)) continue;
+      let touched = false;
+      const next = items.map((item) => {
+        const copy = Object.assign({}, item);
+        if (typeof copy.offer_price === 'string') { copy.offer_price = parseFloat(copy.offer_price); touched = true; }
+        if (typeof copy.list_price === 'string') { copy.list_price = parseFloat(copy.list_price); touched = true; }
+        return copy;
+      });
+      if (!touched) continue;
+      database.run('UPDATE offers SET items = ? WHERE id = ?', [JSON.stringify(next), id]);
+      fixed += 1;
+    }
+    if (fixed) saveDb();
+    res.json({ repaired: fixed });
+  } catch (e) {
+    console.error('[repair] failed:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+// ===== END TEMP REPAIR =====

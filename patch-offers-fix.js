@@ -96,6 +96,48 @@ if (!src.includes('req.rawBody = buf')) {
 src = src.trimEnd() + '\n\n' + fs.readFileSync(BLOCK, 'utf8');
 console.log('  ok: added corrected storefront offers block');
 
+// One-time repair endpoint for offers already written with string prices.
+// Removes itself is not automatic - see REPAIR note printed at the end.
+if (!src.includes('/admin-repair-offer-prices')) {
+  src +=
+    "\n\n// ===== TEMP: one-time repair of string prices in offers.items =====\n" +
+    "// Early storefront offers stored offer_price/list_price as strings, which\n" +
+    "// crashes the app dashboard's reduce().toFixed(). Converts them to numbers.\n" +
+    "app.post('/admin-repair-offer-prices', async (req, res) => {\n" +
+    "  if (req.query.secret !== 'repair-offer-prices-once') {\n" +
+    "    return res.status(403).json({ error: 'Forbidden' });\n" +
+    "  }\n" +
+    "  try {\n" +
+    "    const database = await getDb();\n" +
+    "    const result = database.exec('SELECT id, items FROM offers');\n" +
+    "    const rows = result.length ? result[0].values : [];\n" +
+    "    let fixed = 0;\n" +
+    "    for (const [id, itemsJson] of rows) {\n" +
+    "      let items;\n" +
+    "      try { items = JSON.parse(itemsJson); } catch (e) { continue; }\n" +
+    "      if (!Array.isArray(items)) continue;\n" +
+    "      let touched = false;\n" +
+    "      const next = items.map((item) => {\n" +
+    "        const copy = Object.assign({}, item);\n" +
+    "        if (typeof copy.offer_price === 'string') { copy.offer_price = parseFloat(copy.offer_price); touched = true; }\n" +
+    "        if (typeof copy.list_price === 'string') { copy.list_price = parseFloat(copy.list_price); touched = true; }\n" +
+    "        return copy;\n" +
+    "      });\n" +
+    "      if (!touched) continue;\n" +
+    "      database.run('UPDATE offers SET items = ? WHERE id = ?', [JSON.stringify(next), id]);\n" +
+    "      fixed += 1;\n" +
+    "    }\n" +
+    "    if (fixed) saveDb();\n" +
+    "    res.json({ repaired: fixed });\n" +
+    "  } catch (e) {\n" +
+    "    console.error('[repair] failed:', e.message);\n" +
+    "    res.status(500).json({ error: e.message });\n" +
+    "  }\n" +
+    "});\n" +
+    "// ===== END TEMP REPAIR =====\n";
+  console.log('  ok: added one-time price repair endpoint');
+}
+
 fs.writeFileSync(FILE + '.backup', original);
 fs.writeFileSync(FILE, src);
 console.log('\nPatched server.js (backup saved as server.js.backup)');

@@ -202,8 +202,12 @@ async function createOfferFromSession(session) {
       product_title: m.product_title || '',
       product_id: m.product_id || null,
       variant_id: variantGid,
-      list_price: m.list_price || null,
-      offer_price: m.offer_price || null,
+      // MUST be numbers, not strings. The app's admin dashboard does
+      //   items.reduce((sum, i) => sum + (i.offer_price ?? 0), 0).toFixed(2)
+      // and a string turns that reduce into concatenation, producing a string
+      // with no .toFixed() - which crashes the whole dashboard.
+      list_price: m.list_price ? parseFloat(m.list_price) : null,
+      offer_price: m.offer_price ? parseFloat(m.offer_price) : null,
       competitor_link: m.price_match_link || null,
     },
   ];
