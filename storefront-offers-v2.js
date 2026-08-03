@@ -97,17 +97,36 @@ function ensureOfferColumns(database) {
   }
 }
 
+// Accepts EITHER a single item (legacy shape) or an items array (basket).
+// The basket is deliberately NOT persisted server-side: it lives in the
+// browser until submitted. Per-item detail rides in Stripe metadata, one key
+// per item - Stripe allows 50 keys of 500 chars, which comfortably covers a
+// basket of this size without any new table.
+const MAX_BASKET_ITEMS = 20;
+
 app.post('/storefront-offers', requireShopifyCustomer, async (req, res) => {
   try {
-    const { variant_id, amount_cents, message, open_to_counter, price_match_link } = req.body;
+    const body = req.body || {};
+    const { message, open_to_counter } = body;
 
-    if (!variant_id || !amount_cents) {
-      return res.status(400).json({ error: 'Missing offer details.' });
+    // Normalize to an array so single and basket offers share one code path.
+    const requested = Array.isArray(body.items)
+      ? body.items
+      : [
+          {
+            variant_id: body.variant_id,
+            amount_cents: body.amount_cents,
+            price_match_link: body.price_match_link,
+          },
+        ];
+
+    if (!requested.length) {
+      return res.status(400).json({ error: 'Your offer is empty.' });
     }
-
-    const offerCents = parseInt(amount_cents, 10);
-    if (!Number.isFinite(offerCents) || offerCents <= 0) {
-      return res.status(400).json({ error: 'Enter a valid offer amount.' });
+    if (requested.length > MAX_BASKET_ITEMS) {
+      return res
+        .status(400)
+        .json({ error: 'You can offer on up to ' + MAX_BASKET_ITEMS + ' tapes at once.' });
     }
 
     const customer = await getShopifyCustomerForOffer(req.shopifyCustomerId);
@@ -115,44 +134,75 @@ app.post('/storefront-offers', requireShopifyCustomer, async (req, res) => {
       return res.status(400).json({ error: 'Could not verify your account.' });
     }
 
-    const variant = await getVariantForOffer(variant_id);
-    if (!variant || !variant.availableForSale) {
-      return res.status(400).json({ error: 'This tape is no longer available.' });
-    }
+    // Validate every line against Shopify. Browser-supplied prices are never
+    // trusted - list price and availability come from the Admin API.
+    const validated = [];
+    for (const line of requested) {
+      if (!line || !line.variant_id || !line.amount_cents) {
+        return res.status(400).json({ error: 'Missing offer details.' });
+      }
 
-    const listCents = Math.round(parseFloat(variant.price) * 100);
-    if (offerCents >= listCents) {
-      return res
-        .status(400)
-        .json({ error: 'Your offer must be less than the listed price.' });
+      const offerCents = parseInt(line.amount_cents, 10);
+      if (!Number.isFinite(offerCents) || offerCents <= 0) {
+        return res.status(400).json({ error: 'Enter a valid offer amount for every tape.' });
+      }
+
+      const variant = await getVariantForOffer(line.variant_id);
+      if (!variant || !variant.availableForSale) {
+        return res.status(400).json({
+          error: 'One of these tapes is no longer available. Please remove it and try again.',
+        });
+      }
+
+      const listCents = Math.round(parseFloat(variant.price) * 100);
+      if (offerCents >= listCents) {
+        const title = variant.product ? variant.product.title : variant.title || 'a tape';
+        return res.status(400).json({
+          error: 'Your offer on "' + title + '" must be less than the listed price.',
+        });
+      }
+
+      validated.push({
+        variant_id: String(line.variant_id),
+        product_id: variant.product ? String(variant.product.id).replace(/^.*\//, '') : '',
+        product_title: (variant.product ? variant.product.title : variant.title || ''),
+        list_price: (listCents / 100).toFixed(2),
+        offer_price: (offerCents / 100).toFixed(2),
+        price_match_link: String(line.price_match_link || ''),
+      });
     }
 
     const buyerName =
       [customer.firstName, customer.lastName].filter(Boolean).join(' ') ||
       customer.email;
 
-    // One Stripe customer per email, shared with the app's offers.
     const existing = await stripe.customers.list({ email: customer.email, limit: 1 });
     const stripeCustomer =
       existing.data[0] ??
       (await stripe.customers.create({ email: customer.email, name: buyerName }));
 
-    // Offer details ride in metadata. Stripe caps values at 500 chars, so
-    // anything free-text gets trimmed.
+    // One metadata key per item. Short property names and trimmed strings keep
+    // each value well under Stripe's 500-character ceiling.
     const metadata = {
       source: 'storefront',
       shopify_customer_id: String(req.shopifyCustomerId),
       buyer_name: buyerName.slice(0, 200),
       buyer_email: customer.email.slice(0, 200),
-      variant_id: String(variant_id),
-      product_id: variant.product ? String(variant.product.id).replace(/^.*\//, '') : '',
-      product_title: (variant.product ? variant.product.title : variant.title || '').slice(0, 400),
-      list_price: (listCents / 100).toFixed(2),
-      offer_price: (offerCents / 100).toFixed(2),
       open_to_counter: open_to_counter === false ? '0' : '1',
-      price_match_link: String(price_match_link || '').slice(0, 400),
       offer_message: String(message || '').slice(0, 400),
+      item_count: String(validated.length),
     };
+
+    validated.forEach((item, index) => {
+      metadata['item_' + index] = JSON.stringify({
+        v: item.variant_id,
+        p: item.product_id,
+        t: item.product_title.slice(0, 160),
+        l: item.list_price,
+        o: item.offer_price,
+        c: item.price_match_link.slice(0, 160),
+      }).slice(0, 490);
+    });
 
     const session = await stripe.checkout.sessions.create({
       mode: 'setup',
@@ -190,27 +240,55 @@ async function createOfferFromSession(session) {
 
   // variant_id MUST be a full GID: createShopifyOrder() feeds it straight into
   // a GraphQL mutation when an offer is accepted, and that requires a GID.
-  // This matches what the app writes.
-  const variantGid = m.variant_id
-    ? (String(m.variant_id).startsWith('gid://')
-        ? String(m.variant_id)
-        : 'gid://shopify/ProductVariant/' + String(m.variant_id))
-    : null;
+  function toVariantGid(v) {
+    if (!v) return null;
+    const s = String(v);
+    return s.startsWith('gid://') ? s : 'gid://shopify/ProductVariant/' + s;
+  }
 
-  const items = [
-    {
+  // Rebuild the item list from metadata. Newer offers use item_0..item_N;
+  // the single-item shape is kept for any session created before the basket
+  // work landed.
+  const items = [];
+  const count = parseInt(m.item_count, 10);
+
+  if (Number.isFinite(count) && count > 0) {
+    for (let i = 0; i < count; i += 1) {
+      const raw = m['item_' + i];
+      if (!raw) continue;
+      let parsed;
+      try {
+        parsed = JSON.parse(raw);
+      } catch (e) {
+        console.error('[storefront-offers] could not parse item_' + i);
+        continue;
+      }
+      items.push({
+        product_title: parsed.t || '',
+        product_id: parsed.p || null,
+        variant_id: toVariantGid(parsed.v),
+        // Numbers, not strings - the admin dashboard sums these and calls
+        // .toFixed(), which breaks on string concatenation.
+        list_price: parsed.l ? parseFloat(parsed.l) : null,
+        offer_price: parsed.o ? parseFloat(parsed.o) : null,
+        competitor_link: parsed.c || null,
+      });
+    }
+  } else if (m.variant_id) {
+    items.push({
       product_title: m.product_title || '',
       product_id: m.product_id || null,
-      variant_id: variantGid,
-      // MUST be numbers, not strings. The app's admin dashboard does
-      //   items.reduce((sum, i) => sum + (i.offer_price ?? 0), 0).toFixed(2)
-      // and a string turns that reduce into concatenation, producing a string
-      // with no .toFixed() - which crashes the whole dashboard.
+      variant_id: toVariantGid(m.variant_id),
       list_price: m.list_price ? parseFloat(m.list_price) : null,
       offer_price: m.offer_price ? parseFloat(m.offer_price) : null,
       competitor_link: m.price_match_link || null,
-    },
-  ];
+    });
+  }
+
+  if (!items.length) {
+    console.error('[storefront-offers] session ' + session.id + ' had no usable items');
+    return null;
+  }
 
   const now = new Date().toISOString();
   database.run(
@@ -225,7 +303,9 @@ async function createOfferFromSession(session) {
       JSON.stringify(items),
       session.customer || null,
       m.shopify_customer_id || null,
-      m.price_match_link || null,
+      // Links are per-item (items[].competitor_link, which the email renders).
+      // This column only carries a value for single-item offers.
+      items.length === 1 ? items[0].competitor_link : null,
       now,
       now,
     ]
